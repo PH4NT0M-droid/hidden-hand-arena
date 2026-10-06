@@ -1,0 +1,131 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=2.3cm,headheight=14pt]{geometry}
+\usepackage{xcolor}
+\usepackage{amssymb,amsmath}
+\usepackage{booktabs,tabularx,array}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning}
+\usepackage[hidelinks]{hyperref}
+\usepackage{microtype}
+
+% ── colours (from the poster) ─────────────────────────────
+\definecolor{mint}{HTML}{1F9E7A}
+\definecolor{ink}{HTML}{1A1F1E}
+\definecolor{quiet}{HTML}{5E6B68}
+\definecolor{rule}{HTML}{C9D3D0}
+\definecolor{codebg}{HTML}{F3F6F5}
+\definecolor{tbd}{HTML}{B3261E}
+
+\color{ink}
+\newcommand{\TBD}[1]{\textcolor{tbd}{\textbf{[TBD: #1]}}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\red}[1]{\textcolor{tbd}{#1}}
+\renewcommand{\arraystretch}{1.25}
+\newcolumntype{L}{>{\raggedright\arraybackslash}X}
+
+% ── headings ──────────────────────────────────────────────
+\titleformat{\section}{\sffamily\Large\bfseries\color{mint}}{\thesection}{0.8em}{}
+\titleformat{\subsection}{\sffamily\large\bfseries}{\thesubsection}{0.7em}{}
+\titleformat{\subsubsection}{\sffamily\normalsize\bfseries}{}{0em}{}
+\titlespacing*{\section}{0pt}{1.6em}{0.6em}
+\titlespacing*{\subsection}{0pt}{1.2em}{0.4em}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.55em}
+\setlist{itemsep=0.2em,topsep=0.3em}
+
+% ── header and footer ─────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\sffamily\footnotesize\color{quiet}Hidden Hand · The Quant Club, IIT (BHU) Varanasi}
+\fancyhead[R]{\sffamily\footnotesize\color{quiet}5--8 October 2026}
+\fancyfoot[C]{\sffamily\footnotesize\color{quiet}\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\headrule}{\color{rule}\hrule width\headwidth height\headrulewidth}
+
+% ── code ──────────────────────────────────────────────────
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  frame=none, xleftmargin=0.6em, xrightmargin=0.6em,
+  aboveskip=0.8em, belowskip=0.6em,
+  keywordstyle=\color{mint}\bfseries,
+  commentstyle=\color{quiet}\itshape,
+  stringstyle=\color{ink},
+  columns=fullflexible, keepspaces=true, showstringspaces=false,
+  breaklines=true, upquote=true
+}
+
+% ── cards ─────────────────────────────────────────────────
+\newcommand{\cs}[1]{#1$\spadesuit$}
+\newcommand{\ch}[1]{\red{#1$\heartsuit$}}
+\newcommand{\cd}[1]{\red{#1$\diamondsuit$}}
+\newcommand{\cc}[1]{#1$\clubsuit$}
+
+\begin{document}
+
+\begin{titlepage}
+\thispagestyle{empty}
+\vspace*{3cm}
+{\sffamily\small\color{mint}\textbf{THE QUANT CLUB · IIT (BHU) VARANASI}}\par
+\vspace{1.2cm}
+{\sffamily\fontsize{46}{50}\selectfont\bfseries HIDDEN\par}
+{\sffamily\fontsize{46}{50}\selectfont\bfseries\color{mint} HAND\par}
+\vspace{0.8cm}
+{\sffamily\Large Problem Statement\par}
+\vspace{0.4cm}
+{\large\itshape\color{quiet} Different hands. Same rules. Only the sharpest minds win.\par}
+\vspace{2cm}
+{\color{rule}\rule{\linewidth}{0.6pt}}\par
+\vspace{0.4cm}
+\begin{tabularx}{\linewidth}{@{}lL@{}}
+\textbf{Dates}  & 5 to 8 October 2026 \\
+\textbf{Format} & Teams of 3, each with a mentor \\
+\textbf{Arena}  & Link on the WhatsApp community \\
+\textbf{Kit}    & Download from the arena (\emph{Kit}, top bar) \\
+\textbf{Questions} & Your mentor, then the WhatsApp community \\
+\textbf{Instagram} & @thequantclub.itbhu \\
+\end{tabularx}
+\vfill
+{\sffamily\small\color{quiet} Analyze. Develop. Outplay.}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+% The body is written with subsections inside the organisers' plan; here they are the top level.
+\let\oldsubsection\subsection
+\let\subsection\section
+\let\subsubsection\oldsubsection
+
+\section*{Hidden Hand}
+\input{ps_body}
+
+\section{Timeline}
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}>{\bfseries}l L L@{}}
+\toprule
+\textbf{Day} & \textbf{What happens} & \textbf{Aim to have} \\
+\midrule
+Mon 5 Oct & Kickoff: the game, the kit, meet your mentor. The arena opens &
+  Run \code{python backtester.py -{}-show} and explain one deal end to end \\
+Tue 6 Oct & Mentor check-in 1 & A bot that beats \code{naive} and is on the live board \\
+Wed 7 Oct & Mentor check-in 2 & A bot that beats \code{reader}; you know where you lose PnL \\
+Thu 8 Oct & Uploads close (exact time on the WhatsApp community). Final run, then results &
+  Your newest upload is the one you want \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+All updates go out on the WhatsApp community (the QR code on the poster). Rules may be
+clarified during the event, and announcements there apply to everyone.
+
+\end{document}

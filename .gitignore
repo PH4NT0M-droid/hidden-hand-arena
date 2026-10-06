@@ -1,0 +1,5 @@
+arena_data/
+__pycache__/
+*.pyc
+keys.txt
+teams.txt

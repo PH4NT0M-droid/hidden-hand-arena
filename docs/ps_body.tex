@@ -1,0 +1,281 @@
+% The problem statement body, shared by hidden_hand.tex and participant_ps.tex.
+You will write a Python bot that plays a card-trading game against other teams' bots. Every
+bot holds a hidden hand of cards, and they trade a stock whose value is set by everyone's
+cards. No finance background is needed. If you can write a Python class and you know what an
+average is, you can start today.
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lL@{}}
+\toprule
+\textbf{Build}   & One Python file: a \code{Bot} class with three methods \\
+\textbf{Play}    & Two bots, zero-sum, 5 rounds per deal, hundreds of deals per fight \\
+\textbf{Win}     & Highest score: your PnL (profit and loss) deal by deal, on a square-root scale so luck cannot decide it \\
+\textbf{Allowed} & Python 3.10+, standard library only, AI tools \\
+\textbf{Submit}  & Upload to the arena (link on the WhatsApp community). Results appear within minutes \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{The game}
+
+The house shuffles one ordinary 52-card deck. Each card is worth its rank: A $=1$, 2 to 10 at
+face value, J $=11$, Q $=12$, K $=13$.
+
+\begin{itemize}
+  \item \textbf{You} get 5 cards. Only you see them.
+  \item \textbf{Your opponent} gets 5 cards. Only they see them.
+  \item \textbf{The board} is 5 more cards, face down. One is turned face up at the start of
+        each of rounds 2, 3, 4 and 5. The last one stays hidden until the end.
+\end{itemize}
+
+The stock you trade is worth \textbf{the sum of all 15 cards}: your hand, their hand and the
+whole board, which averages 105. At the end every card is turned over and every trade is paid
+out. If you bought below the final sum or sold above it, you made money, and your opponent lost
+exactly that amount.
+
+\subsection{A round}
+
+Every deal has five rounds. In each round a board card is turned (rounds 2 to 5), both bots
+choose a move at the same time, one bot quotes a price and the other trades on it, and then the
+roles swap.
+
+\subsubsection{Moves}
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}l c L@{}}
+\toprule
+\textbf{Move} & \textbf{Cost} & \textbf{What it does} \\
+\midrule
+nothing & 0 & -- \\
+\code{"PEEK"} & 3 & You privately see one random card from the opponent's hand. They learn
+  that you peeked, but not which card. \\
+\code{("SWAP", i)} & 0 & Throw away card \code{i} of your hand face up and draw a new card that
+  only you see. Once per deal. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+A swap changes the stock's value. If you hold 4 lots and swap a 2 for a Q, everything you hold
+is worth 10 more per lot. Your opponent sees the 2 go but not what replaced it.
+
+\subsubsection{Trading}
+
+The \emph{maker} names a single price. The \emph{taker} may buy up to 2 lots at price $+\,2$,
+sell up to 2 lots at price $-\,2$, or pass. Every round each bot quotes once and trades once.
+Nobody may hold more than 10 lots long or short.
+
+\textbf{The maker's price is a clue.} A maker usually quotes what it thinks the stock is worth,
+and that depends on its hand. The taker's choice to buy or sell is a clue too. Reading these
+clues is how you learn the hidden hand.
+
+\textbf{Fairness.} Every deal is played twice with the hands swapped. Two copies of the same
+bot always score exactly zero.
+
+\subsection{A real deal}
+
+House bot \code{sharp} against house bot \code{reader}. Reproduce it with
+\code{python backtester.py sharp reader -{}-deals 1 -{}-show}.
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\code{sharp} holds  & \cd{Q}\ \cc{4}\ \cd{5}\ \cs{10}\ \ch{6} \quad (sum 37) \\
+\code{reader} holds & \cs{7}\ \ch{4}\ \cc{3}\ \cc{7}\ \ch{9} \quad (sum 30) \\
+Board, face down    & \cc{A}\ \cc{10}\ \ch{J}\ \cc{J}\ \cc{8} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{description}[leftmargin=0pt]
+  \item[Round 1.] \code{sharp} reckons $37 + 10 \times 6.96 = 106.6$ (ten unseen cards at the
+    average unseen rank) and quotes that. \code{reader} thinks the stock is cheaper and sells 2
+    at 104.57. \code{reader} then quotes 101.04, and \code{sharp} buys 2 at 103.04.
+  \item[Round 2.] \cc{A} turns. \code{sharp} is long, so it swaps its \cc{4} and draws a
+    \cd{7}: $+3$ on everything it holds. It keeps buying from \code{reader}.
+  \item[Rounds 3--5.] Prices close in and trading stops. \code{sharp} finishes long 10.
+  \item[Settlement.] $40 + 30 + 41 = 111$. \code{sharp} bought at about 103 and makes $+82$.
+    The same deal is then played again with the hands swapped.
+\end{description}
+
+\subsection{Your bot}
+
+\begin{lstlisting}[language=Python]
+class Bot:
+    def move(self, obs):            # once per round, before trading
+        return None                 # or "PEEK", or ("SWAP", index)
+
+    def quote(self, obs):           # you are the maker
+        return 104.5                # they buy at 106.5 or sell at 102.5
+
+    def respond(self, obs, price):  # they quoted `price`
+        return 2                    # +n buy n, -n sell n, 0 pass
+\end{lstlisting}
+
+A fresh \code{Bot()} is built for every deal. \code{obs} holds everything you are allowed to
+know:
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lL@{}}
+\toprule
+\textbf{Field} & \textbf{Meaning} \\
+\midrule
+\code{round} & 1 to 5 \\
+\code{hand} & your 5 cards now, as ranks 1 to 13 \\
+\code{board} & board cards turned so far \\
+\code{opp\_known} & opponent cards you peeked that they still hold \\
+\code{unseen} & \code{unseen[r-1]} $=$ copies of rank \code{r} you have not seen anywhere
+  (card counting, done for you) \\
+\code{position}, \code{cash}, \code{spent} & lots held ($+$ long, $-$ short), money from
+  trades, paid for moves \\
+\code{tape} & every quote so far: \code{(round, "me"/"opp", price, qty)} \\
+\code{discards} & every swapped-out card: \code{(round, "me"/"opp", rank)} \\
+\code{peeks} & every peek: \code{(round, "me"/"opp")} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+A crash, an unusable return value or a call over 50\,ms counts as doing nothing for that
+action. If your \code{quote()} fails, the house quotes 105 for you.
+
+\subsection{House bots}
+
+Three reference bots ship with the kit and play in the arena. You may copy anything from them.
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lL@{}}
+\toprule
+\textbf{Bot} & \textbf{What it does} \\
+\midrule
+\code{naive} & Counts cards: my cards $+$ unseen cards $\times$ average unseen rank. Ignores the
+  opponent and never moves. \textbf{The starter bot is \code{naive}.} \\
+\code{reader} & \code{naive}, plus it estimates the opponent's hand from their last price \\
+\code{sharp} & \code{reader}, plus it swaps a low card when long (a high one when short) and
+  sizes trades by edge. Never peeks \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+They are far from the best possible bot. Things they never try: peeking, learning from the
+opponent's trades, expecting the opponent to swap, and quoting a price that hides their own
+hand.
+
+\textbf{Test properly.} One deal can swing by 60 or more. Run 1,000 deals (about two seconds)
+on two or three seeds before you believe a change helped.
+
+\subsection{The arena}
+
+You submit and see results on the arena; its link is posted on the WhatsApp community.
+
+\begin{enumerate}
+  \item Log in with the team key the organisers give you.
+  \item Upload your \code{.py} file. It is checked at once; a failed check shows why and does
+        not count against your upload limit.
+  \item Your newest working file then plays every other team's newest file and the house bots
+        on hidden deals. The live standings rank the score (see Evaluation), and you can watch the first
+        deal of any fight, round by round.
+\end{enumerate}
+
+Code is never shown to anyone; results and replays are public. You may upload once every 10
+minutes, and your newest working file is your entry.
+
+\textbf{The final.} After the deadline every entry plays every other on a different hidden set
+of deals. Only the final decides the result.
+
+\subsection{What you submit}
+
+One \code{.py} file per team, made from \code{starter\_bot.py}, which:
+
+\begin{itemize}
+  \item starts with these three lines, filled in:
+\begin{lstlisting}
+# Team Name: Your Team Name
+# Members: Name 1 (Roll No.), Name 2 (Roll No.), Name 3 (Roll No.)
+# Mentor: Your Mentor's Name
+\end{lstlisting}
+  \item defines \code{Bot} with \code{move}, \code{quote} and \code{respond};
+  \item imports only \code{math}, \code{random}, \code{statistics}, \code{collections},
+        \code{heapq}, \code{bisect}, \code{itertools}, \code{functools}, \code{typing};
+  \item passes \code{python backtester.py -{}-validate your\_bot.py};
+  \item keeps nothing from one deal to the next.
+\end{itemize}
+
+\subsection{Evaluation}
+
+You are ranked on a \textbf{score} built deal by deal, so that one lucky deal cannot decide
+anything.
+
+\begin{enumerate}
+  \item Every deal is played twice with the hands swapped. Add your PnL from the two plays and
+        call it $p$. The luck of the cards mostly cancels here.
+  \item Take the signed square root of $p$: a deal pair won by 100 counts $+10$, one won by
+        25 counts $+5$, one lost by 16 counts $-4$.
+  \item Your score is the average of these over every deal pair of every final fight:
+\[
+  \text{score} \;=\; \frac{1}{N}\sum_{i=1}^{N} \operatorname{sign}(p_i)\,\sqrt{|p_i|}
+\]
+\end{enumerate}
+
+A single huge win, say a lucky last card while you are long 10, counts for far less than its
+raw PnL, while winning deal after deal counts in full. Tested over 12 sets of 500 deals, this
+separates a better bot from a worse one far more reliably than raw PnL. \code{backtester.py}
+prints your score, so you can tune for exactly what is ranked.
+
+Ties are broken on PnL per deal. Every bot plays every other bot and the three house bots the
+same number of deals. House bots do not take a place.
+
+\subsection{Rules}
+
+\begin{enumerate}
+  \item Your bot is your team's own work. Discussing ideas is fine; sharing code or another
+        team's tuned numbers is not. The starter and house bots are free to copy.
+  \item AI tools are allowed. Any member must be able to explain any part of the file.
+  \item Mentors guide; they do not build. A bot written or tuned by a mentor is disqualified.
+  \item Play the game, not the system. Reading files, using the network or keeping state
+        between deals gets the file rejected. Report loopholes; do not use them.
+  \item One team, one entry. A member may be in only one team.
+  \item The organisers' decision is final. Ask on the group before building on a guess.
+\end{enumerate}
+
+\subsection{Quick start}
+
+Download the kit from the arena (\emph{Kit}, top bar), unzip it, then:
+
+\begin{lstlisting}[language=bash]
+cd hiddenhand                     # Python 3.10+, nothing to install
+python backtester.py --show       # sharp vs reader, one deal printed
+cp starter_bot.py my_bot.py       # your entry starts here
+python backtester.py my_bot.py naive --deals 1000
+python backtester.py --validate my_bot.py
+\end{lstlisting}
+
+\subsection{FAQ}
+
+\begin{description}[leftmargin=0pt,style=nextline]
+  \item[I have never traded. Is that a problem?] No. It is a probability game more than a
+    finance one.
+  \item[Can I use numpy or pandas?] No, standard library only. The game is small enough not to
+    need them.
+  \item[How fast must my bot be?] A millisecond or two per call. A call over 50\,ms counts as
+    doing nothing.
+  \item[Why did my rank change when I did not upload?] Other teams uploaded, and your bot now
+    plays their new bots.
+  \item[Where do I ask?] Your mentor first, then the WhatsApp community. Rule answers given
+    there apply to everyone.
+\end{description}
+
+\subsubsection{Glossary}
+
+\begin{center}
+\begin{tabularx}{\linewidth}{@{}lL@{}}
+\toprule
+\textbf{PnL} & Profit and loss: how much you made (positive) or lost (negative) \\
+\textbf{Long / short} & Long: you bought, so you gain if the sum ends higher. Short: you sold \\
+\textbf{Lot} & One unit of the stock; each lot pays the final sum \\
+\textbf{Maker / taker} & The maker names the price; the taker decides whether to trade \\
+\textbf{Spread} & The gap between the buy price (price $+\,2$) and the sell price (price $-\,2$) \\
+\textbf{Card counting} & Tracking which cards are gone, so you know what is left \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+% ═════════════════════════════════════════════════════════
