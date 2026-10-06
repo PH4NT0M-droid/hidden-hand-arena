@@ -603,7 +603,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
     server_version = "HiddenHand"
 
     def log_message(self, fmt, *args):
-        pass
+        # Access log to stderr, picked up by `docker compose logs` (see
+        # scripts/logs.sh). Behind nginx the socket peer is the proxy, so
+        # prefer the forwarded client address. Format:
+        #   2026-10-08T18:01:22 1.2.3.4 "GET / HTTP/1.1" 200 5123
+        fwd = (self.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+        who = fwd or self.client_address[0]
+        sys.stderr.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {who} {fmt % args}\n")
+        sys.stderr.flush()
 
     def team(self) -> str | None:
         c = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
@@ -687,6 +694,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except sqlite3.IntegrityError:
                 return self.redirect("/submit?m=" + urllib.parse.quote(
                     f"{name} is taken. If that is your team, log in with your key."))
+            print(f"  + team {name}", flush=True)  # audit trail for scripts/logs.sh
             return self.redirect("/submit?m=" + urllib.parse.quote(
                 f"Registered. Your team key is {key} . Save it and send it to your teammates: "
                 "it is the only way to log in again."),
@@ -701,6 +709,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not files:
                 return self.redirect("/submit?m=" + urllib.parse.quote("Choose a .py file first."))
             note = accept_upload(team, files[0].get_payload(decode=True) or b"")
+            print(f"  upload {team}: {note}", flush=True)  # audit trail for scripts/logs.sh
             return self.redirect("/submit?m=" + urllib.parse.quote(note))
         self.send("Not found", 404, "text/plain")
 

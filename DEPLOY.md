@@ -113,3 +113,28 @@ Do not use Render's free tier. It sleeps when idle and wipes the disk.
 
 Count the time the final needs: with 30 entries there are about 500 fights, and 500 deals
 each way takes about 5 to 10 s per fight per worker. With 3 workers, plan on 15 to 30 minutes.
+
+## Logging (no monitoring needed)
+
+Nobody has to watch a terminal during the event. Every request is logged by the
+arena (with the real client address even behind nginx), every registration and
+upload is logged with the team name, and nginx logs all proxy traffic. Container
+logs rotate automatically (10 MB × 3 per service).
+
+```bash
+./scripts/logs.sh              # last 200 lines of everything
+./scripts/logs.sh --errors     # 5xx responses, tracebacks, failed jobs
+./scripts/logs.sh --uploads    # who registered / uploaded, and the verdict
+./scripts/logs.sh --export day1.log   # dump everything for later
+```
+
+For a hands-off uptime record, log a heartbeat to `logs/health.log` every 5
+minutes from cron:
+
+```cron
+*/5 * * * * /home/user/hiddenhand/scripts/watch.sh
+```
+
+After the event, `logs/health.log` shows the site never went down (or exactly
+when it did), and `./scripts/logs.sh --export` preserves the full story.
+Crashed containers restart by themselves (`restart: unless-stopped`).

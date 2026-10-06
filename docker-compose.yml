@@ -1,0 +1,54 @@
+name: hiddenhand
+
+# Single-host production stack: arena (stdlib HTTP on 8000) behind nginx.
+# SQLite lives in the hh-data volume. Run EXACTLY ONE arena replica:
+# the DB is a single-writer store, scaling to 2+ replicas corrupts/splits it.
+
+services:
+  arena:
+    build: .
+    image: hiddenhand-arena:latest
+    container_name: hiddenhand-arena
+    env_file:
+      - path: .env
+        required: false # all vars below have sane defaults; .env overrides them
+    environment:
+      PORT: "8000" # must match the nginx upstream; change both together
+      ARENA_DATA: /data
+      TZ: ${TZ:-UTC}
+      DEADLINE: ${DEADLINE:-}
+      DEALS: ${DEALS:-200}
+      FINAL_DEALS: ${FINAL_DEALS:-500}
+      COOLDOWN: ${COOLDOWN:-600}
+      WORKERS: ${WORKERS:-3}
+    volumes:
+      - hh-data:/data
+    expose:
+      - "8000" # reachable only via nginx, never published to the host
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: hiddenhand-nginx
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      arena:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  hh-data:
