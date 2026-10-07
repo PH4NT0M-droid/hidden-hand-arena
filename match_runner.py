@@ -50,7 +50,7 @@ def run(job: dict) -> dict:
                 path = Path(tmp) / str(side) / Path(bot["file"]).name
                 path.parent.mkdir()
                 path.write_text(bot["source"], encoding="utf-8")
-                boxes.append(SandboxedBot(path, bot["name"]))
+                boxes.append(SandboxedBot(path, bot["name"], budget_s=job.get("budget_s")))
         r = play_match(boxes[0].new_deal, boxes[1].new_deal, n_deals=job["deals"], seed=job["seed"],
                        names=tuple(job["names"]), keep_logs=job.get("keep_logs", False))
     finally:

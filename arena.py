@@ -53,6 +53,7 @@ import http.server
 import io
 import itertools
 import json
+import math
 import os
 import re
 import secrets
@@ -94,6 +95,9 @@ MATCH_WALL_S = int(os.environ.get("MATCH_WALL_S", 3600))
 # Organiser panel at /admin, logged into with this key. Empty: no panel at all.
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 MAX_BYTES = 100_000
+# Thinking time each bot gets per fight: 30 s per 400 deals played (a live fight
+# is 200 deals both ways round = 400). Scaled to the fight's length.
+THINK_S_PER_400 = 30.0
 HOUSE = ("naive", "reader", "sharp")
 KIT_FILES = ("README.md", "rules.py", "engine.py", "backtester.py", "starter_bot.py",
              "bot_loader.py",
@@ -178,6 +182,7 @@ def sub_path(row) -> Path:
 def fight(a, b, deals: int, seed: int, keep_logs: bool = False) -> dict:
     """Sandboxed, mirrored match between two subs rows: in its own container, or in-process."""
     job = {"deals": deals, "seed": seed, "names": [a["team"], b["team"]], "keep_logs": keep_logs,
+           "budget_s": THINK_S_PER_400 * 2 * deals / 400,
            "bots": [{"name": f"sub{s['id']}", "file": sub_path(s).name,
                      "source": sub_path(s).read_text(encoding="utf-8")} for s in (a, b)]}
     if MATCH_ISOLATION != "docker":
@@ -243,6 +248,14 @@ TIME_ERROR = (f"Time limit exceeded: a call took over {R.HARD_TIME_LIMIT_MS:.0f}
               "of that deal. Make it faster.")
 
 
+BUDGET_ERROR = (f"Thinking budget used up: your bot used more than {THINK_S_PER_400:g} s of thinking time per 400 "
+                "deals in a fight, so it did nothing for the rest of that fight. Make it faster.")
+
+
+def is_budget(note: str) -> bool:
+    return "thinking budget" in note
+
+
 def is_slow(note: str) -> bool:
     """Engine notes for a call that overran: the sandbox's 'timeout: ...' or the engine's 'took over'."""
     return note.startswith("timeout") or " took over " in note
@@ -259,7 +272,10 @@ def smoke(sub) -> None:
         status, msg = "broken", "; ".join(problems)
     else:
         status = "ok"
-        msg = (TIME_ERROR if len(other) < len(problems) else "Loaded and played.") + \
+        # A call over 50 ms is the cause worth naming; the budget only when every call was in time.
+        per_call = any(is_slow(p) and not is_budget(p) for p in problems)
+        msg = (TIME_ERROR if per_call else BUDGET_ERROR if any(map(is_budget, problems)) else
+               "Loaded and played.") + \
             (" Problems: " + "; ".join(other) if other else "")
     with db() as con:
         con.execute("update subs set status=?, message=? where id=?", (status, msg[:2000], sub["id"]))
@@ -277,6 +293,21 @@ def claim(job) -> bool:
         return True
 
 
+RANDOM_FIRST = 3  # fights against random opponents before a new bot is matched by rating
+
+
+def live_ratings(ms, ids: set) -> dict[int, tuple[float, int]]:
+    """Each current entry's average live score so far and how many fights it is over (as on the board)."""
+    tot: dict[int, list] = {}
+    for m in ms:
+        if m["a"] in ids and m["b"] in ids:
+            for me, sc in ((m["a"], m["score_a"]), (m["b"], m["score_b"])):
+                t = tot.setdefault(me, [0.0, 0])
+                t[0] += sc or 0.0
+                t[1] += 1
+    return {i: (t[0] / t[1], t[1]) for i, t in tot.items()}
+
+
 def next_job():
     with db() as con:
         for s in con.execute("select * from subs where status = 'queued' order by id"):
@@ -285,22 +316,15 @@ def next_job():
         es = entries(con)
         ms = con.execute("select a, b, score_a, score_b from matches where stage = 'live'").fetchall()
     done = {(m["a"], m["b"]) for m in ms}
-    # Benchmark rating: a bot's average score against the house bots. Every bot
-    # plays the same three, so the ratings compare, unlike a score against
-    # whoever it happened to meet first.
-    house = {e["id"] for e in es if e["house"]}
-    vs_house: dict[int, list[float]] = {}
-    for m in ms:
-        if m["a"] in house and m["b"] not in house:
-            vs_house.setdefault(m["b"], []).append(m["score_b"] or 0.0)
-    bench = {i: sum(s) / len(s) for i, s in vs_house.items()}
+    ids = {e["id"] for e in es}
+    rating = live_ratings(ms, ids)
     # Everyone climbs together: the next fight goes to the bot with the fewest
     # fights so far (running ones included), the longest-waiting on a tie. So a
     # fresh upload starts first, but cannot starve other bots that are behind.
-    # Its opponent: the house bots first (placing it), then the bot rated
-    # closest to it, working outward. Every pair is still played in the end, so
-    # a finished board means what it always did.
-    ids = {e["id"] for e in es}
+    # Its opponents: three at random first, which places it without bias, then
+    # the bot whose current rating (its live score so far) is closest, working
+    # outward. Every pair is still played in the end, so a finished board means
+    # what it always did.
     with BUSY_LOCK:
         taken = done | {(j[1], j[2]) for j in BUSY if j[0] == "live"}
     count = dict.fromkeys(ids, 0)
@@ -310,11 +334,10 @@ def next_job():
             count[b] += 1
 
     def order(x, y):
-        if x["house"] or y["house"]:
-            return (0, 0.0, count[y["id"]], y["id"])
-        if x["id"] not in bench or y["id"] not in bench:  # not placed yet
-            return (2, 0.0, count[y["id"]], y["id"])
-        return (1, abs(bench[y["id"]] - bench[x["id"]]), count[y["id"]], y["id"])
+        shuffle = derive_seed("order", *sorted((x["id"], y["id"])))  # random, but stable between checks
+        if rating.get(x["id"], (0, 0))[1] < RANDOM_FIRST or y["id"] not in rating:
+            return (0 if rating.get(x["id"], (0, 0))[1] < RANDOM_FIRST else 2, 0.0, shuffle)
+        return (1, abs(rating[y["id"]][0] - rating[x["id"]][0]), shuffle)
 
     for x in sorted(es, key=lambda e: (count[e["id"]], e["id"])):
         for y in sorted((y for y in es if y["id"] != x["id"]), key=lambda y: order(x, y)):
@@ -514,10 +537,64 @@ def fights_table(limit: int | None) -> str:
 <th>Bot</th><th class="n">Score</th><th></th></tr></thead><tbody>{rows}</tbody></table></div>"""
 
 
-def log_link(stage: str, a: int, b: int, label: str = "Download log") -> str:
-    """The link only shows when this fight kept a log (fights from before logs existed have none)."""
-    return (f'<a href="/log/{stage}/{a}/{b}.jsonl.gz">{label}</a>' if log_path(stage, a, b).exists()
-            else '<span class="muted">no log</span>')
+def log_link(stage: str, a: int, b: int) -> str:
+    """The links only show when this fight kept a log (fights from before logs existed have none)."""
+    if not log_path(stage, a, b).exists():
+        return '<span class="muted">no log</span>'
+    return (f'<a href="/log/{stage}/{a}/{b}.txt">Readable log</a> · '
+            f'<a href="/log/{stage}/{a}/{b}.jsonl.gz">Data</a>')
+
+
+def log_text(raw: bytes, stage: str) -> str:
+    """A fight's stored log as plain text to read: totals, then every deal written out."""
+    deals = [json.loads(line) for line in gzip.decompress(raw).decode("utf-8").splitlines()]
+    card = lambda c: f"{FACES.get(c % 13 + 1, c % 13 + 1)}{SUITS[c // 13]}"
+    cards = lambda cs: " ".join(map(card, cs))
+    names = deals[0]["names"]
+    tot = {n: {"pnl": 0.0, "peeks": 0, "swaps": 0, "paid": 0.0} for n in names}
+    pairs: dict = {}
+    for i, d in enumerate(deals):
+        for seat, n in enumerate(d["names"]):
+            tot[n]["pnl"] += d["pnl"][seat]
+            tot[n]["paid"] += d["spent"][seat]
+            pairs[(n, i // 2)] = pairs.get((n, i // 2), 0.0) + d["pnl"][seat]
+            for r in d["rounds"]:
+                mv = r["moves"][seat]
+                if mv:
+                    tot[n][mv["kind"] + "s"] += 1
+    out = [f"HIDDEN HAND - {stage} fight: {names[0]} vs {names[1]}",
+           f"{len(deals) // 2} deals, each played twice with the hands swapped ({len(deals)} plays).", ""]
+    for n in names:
+        ps = [p for (m, _), p in pairs.items() if m == n]
+        sc = sum(math.copysign(math.sqrt(abs(p)), p) for p in ps) / len(ps)
+        t = tot[n]
+        out.append(f"{n}: score {sc:+.3f}, PnL {t['pnl'] / len(deals):+.2f} per deal, {t['peeks']} peeks, "
+                   f"{t['swaps']} swaps, paid {t['paid']:g} for moves")
+    out += ["", "Cards: A=1 ... K=13. Taker buys at price + 2 or sells at price - 2. The stock settles at the sum of all 15 cards."]
+    for i, d in enumerate(deals):
+        n = d["names"]
+        out += ["", "=" * 78,
+                f"Deal {i // 2 + 1}, {'as dealt' if i % 2 == 0 else 'hands swapped'}",
+                f"  {n[0]} holds {cards(d['hands'][0])}   |   {n[1]} holds {cards(d['hands'][1])}",
+                f"  Board (face down): {cards(d['board'])}"]
+        for r in d["rounds"]:
+            up = cards(d["board"][:r["shown"]]) or "-"
+            out.append(f"  Round {r['round']}  (board up: {up})")
+            for seat, mv in enumerate(r["moves"]):
+                if mv and mv["kind"] == "peek":
+                    out.append(f"    {n[seat]} peeks: sees {card(mv['card'])}")
+                elif mv:
+                    out.append(f"    {n[seat]} swaps {card(mv['out'])} for {card(mv['in'])}")
+            for q in r["quotes"]:
+                mk, tk, px = n[q["maker"]], n[1 - q["maker"]], q["price"]
+                did = (f"buys {q['qty']} at {px + R.HALF_SPREAD:g}" if q["qty"] > 0 else
+                       f"sells {-q['qty']} at {px - R.HALF_SPREAD:g}" if q["qty"] < 0 else "passes")
+                out.append(f"    {mk} quotes {px:g}{' (no quote: house quoted for it)' if q['auto'] else ''}; {tk} {did}")
+        out.append(f"  Settles at {d['V']}:")
+        for seat in (0, 1):
+            out.append(f"    {n[seat]}: final hand {cards(d['final_hands'][seat])}, position {d['positions'][seat]:+d}, "
+                       f"paid {d['spent'][seat]:g}, PnL {d['pnl'][seat]:+.2f}")
+    return "\n".join(out) + "\n"
 
 
 LOG_FORMAT = """<p class="muted" style="margin:10px 0 0">Every deal of the fight, both ways round, one JSON object per
@@ -525,7 +602,8 @@ line (gzipped). Read it with <code>[json.loads(l) for l in gzip.open(path, "rt")
 <code>names</code> (seat order), <code>hands</code>, <code>board</code>, <code>rounds</code> (each with
 <code>shown</code>, <code>moves</code> and <code>quotes</code>: maker seat, price, qty, auto), <code>V</code>,
 <code>final_hands</code>, <code>positions</code>, <code>spent</code> and <code>pnl</code>. Cards are numbered 0 to 51:
-rank = card % 13 + 1, suit = card // 13. Only the two teams in a fight can download its log.</p>"""
+rank = card % 13 + 1, suit = card // 13. <b>Readable log</b> is the same fight written out as plain text.
+Only the two teams in a fight can download its log.</p>"""
 
 
 def fight_log(team: str | None, stage: str, a: int, b: int) -> bytes | None:
@@ -637,7 +715,7 @@ def match_page(stage: str, a: int, b: int, viewer: str | None = None) -> str | N
 {team_link(m['ta'])} score {money(m['score_a'] or 0, 3)} ({money(m['pnl_a'] / m['deals'])} PnL per deal),
 {team_link(m['tb'])} score {money(m['score_b'] or 0, 3)} ({money(m['pnl_b'] / m['deals'])} PnL per deal).
 Below is the first deal, played both ways round: same cards, seats swapped.</p>{(
-    f'<div class="panel" style="margin-top:18px"><b>Your fight.</b> {log_link(stage, a, b, "Download every deal")}'
+    f'<div class="panel" style="margin-top:18px"><b>Your fight.</b> Every deal: {log_link(stage, a, b)}'
     f'{LOG_FORMAT}</div>') if viewer in (m['ta'], m['tb']) else ''}{halves}"""
 
 
@@ -663,7 +741,7 @@ after that it is your login. Share it only with your teammates.</p></div>""")
             for m in con.execute("select * from matches where stage = 'live' and (a = ? or b = ?)", (cur["id"], cur["id"])):
                 side = 0 if m["a"] == cur["id"] else 1
                 for k, v in json.loads(m["notes"])[side].items():
-                    k = TIME_ERROR if is_slow(k) else k
+                    k = BUDGET_ERROR if is_budget(k) else TIME_ERROR if is_slow(k) else k
                     notes[k] = notes.get(k, 0) + v
     closed = deadline_passed()
     with db() as con:
@@ -678,10 +756,10 @@ files that fail the check do not count. Your newest working file is your entry.<
         f"""<tr><td>#{s['id']}</td><td class="muted">{when(s['created'])}</td>
 <td><span class="tag {'ok' if s['status'] == 'ok' else 'bad' if s['status'] in ('rejected', 'broken') else ''}">{esc(s['status'])}</span>
 {'<span class="tag ok">entry</span>' if cur and s['id'] == cur['id'] else ''}
-{'<span class="tag bad">time limit</span>' if s['message'].startswith(TIME_ERROR) else ''}</td>
+{'<span class="tag bad">time limit</span>' if s['message'].startswith((TIME_ERROR, BUDGET_ERROR)) else ''}</td>
 <td style="white-space:normal">{esc(s['message'])}</td></tr>""" for s in subs) \
         or '<tr><td colspan="4" class="muted">Nothing uploaded yet.</td></tr>'
-    issues = "".join(f"<li{' class=neg' if k == TIME_ERROR else ''}>{esc(k)} <span class='muted'>×{v}</span></li>"
+    issues = "".join(f"<li{' class=neg' if k in (TIME_ERROR, BUDGET_ERROR) else ''}>{esc(k)} <span class='muted'>×{v}</span></li>"
                      for k, v in notes.items())
     issues_html = (f"<h2>Problems in your fights</h2><div class='panel'><ul style='margin:0'>{issues}</ul>"
                    "<p class='muted' style='margin:8px 0 0'>Only your team sees this.</p></div>") if issues else ""
@@ -1001,12 +1079,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = team_page(path[6:], team)
             if body:
                 return self.send(shell(f"{path[6:]} · Hidden Hand", body, team))
-        m = re.fullmatch(r"/log/(live|final)/(\d+)/(\d+)\.jsonl\.gz", path)
+        m = re.fullmatch(r"/log/(live|final)/(\d+)/(\d+)\.(jsonl\.gz|txt)", path)
         log = fight_log(team, m[1], int(m[2]), int(m[3])) if m else None
         if log:
-            return self.send(log, ctype="application/gzip", headers={
-                "Cache-Control": "private, no-store",
-                "Content-Disposition": f'attachment; filename="hiddenhand-{m[1]}-{m[2]}-{m[3]}.jsonl.gz"'})
+            name = f"hiddenhand-{m[1]}-{m[2]}-{m[3]}.{m[4]}"
+            if m[4] == "txt":  # made from the stored log on each click; nothing extra is kept
+                log = log_text(log, m[1]).encode("utf-8")
+            return self.send(log, ctype="text/plain; charset=utf-8" if m[4] == "txt" else "application/gzip",
+                             headers={"Cache-Control": "private, no-store",
+                                      "Content-Disposition": f'attachment; filename="{name}"'})
         m = re.fullmatch(r"/match/(live|final)/(\d+)/(\d+)", path)
         if m:
             body = match_page(m[1], int(m[2]), int(m[3]), team)

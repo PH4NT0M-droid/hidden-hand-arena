@@ -64,6 +64,39 @@ def test_sandbox(tmp: Path):
     assert any("not allowed" in k for k in r["notes"][0]), r["notes"]
 
 
+HEAVY = """
+class Bot:
+    def think(self):
+        return sum(i * i for i in range(60000))  # a few ms of pure Python per call
+    def move(self, obs):
+        self.think()
+        return None
+    def quote(self, obs):
+        self.think()
+        return 105
+    def respond(self, obs, price):
+        self.think()
+        return 0
+"""
+
+
+def test_budget(tmp: Path):
+    """A bot past its thinking budget does nothing for the rest of the fight, and the fight ends quickly."""
+    from sandbox import SandboxedBot
+    heavy = tmp / "heavy.py"
+    heavy.write_text(HEADER.format("Heavy") + HEAVY)
+    box = SandboxedBot(heavy, "heavy", budget_s=0.2)
+    fast = SandboxedBot(HERE / "strategies/naive.py", "naive", budget_s=0.2)
+    t0 = time.time()
+    r = play_match(box.new_deal, fast.new_deal, n_deals=20)
+    used, fast_used = box.used_s, fast.used_s
+    box.close(); fast.close()
+    out = sum(v for k, v in r["notes"][0].items() if "thinking budget" in k)
+    assert out > 300 and 0.2 <= used < 1.0, (out, used, r["notes"][0])  # ran out, then was never called again
+    assert not any("thinking budget" in k for k in r["notes"][1]) and fast_used < 0.2, (fast_used, r["notes"][1])
+    assert time.time() - t0 < 30
+
+
 def test_arena(tmp: Path):
     port = socket.socket(); port.bind(("127.0.0.1", 0)); p = port.getsockname()[1]; port.close()
     env = dict(os.environ, ARENA_DATA=str(tmp / "data"), PORT=str(p), COOLDOWN="0", DEALS="10", WORKERS="2",
@@ -137,19 +170,24 @@ def test_logs(base: str, keys: list[str], data: Path):
     alpha, beta, anon = login(keys[0]), login(keys[1]), urllib.request.build_opener()
     page = alpha.open(base + "/team/Alpha").read().decode()
     assert "Cards are numbered 0 to 51" in page
-    log = page.split('href="/log/')[1].split('"')[0]
+    log = next(x.split('"')[0] for x in page.split('href="/log/')[1:] if x.split('"')[0].endswith(".jsonl.gz"))
     rows = [json.loads(l) for l in gzip.decompress(alpha.open(base + "/log/" + log).read()).decode().splitlines()]
     assert len(rows) == 20 and "Alpha" in rows[0]["names"] and len(rows[0]["rounds"]) == 5  # 10 deals, both ways
-    house = next(x for x in page.split('href="/log/')[1:] if "Beta" not in
-                 alpha.open(base + "/match/" + x.split(".jsonl")[0]).read().decode().split("<h1>")[1].split("</h1>")[0])
+    text = alpha.open(base + "/log/" + log.replace(".jsonl.gz", ".txt")).read().decode()
+    assert "Deal 10, hands swapped" in text and "Settles at" in text and "score" in text, text[:500]
+    fights = [x.split('"')[0][:-len(".jsonl.gz")] for x in page.split('href="/log/')[1:]
+              if x.split('"')[0].endswith(".jsonl.gz")]  # e.g. "live/1/5"
+    title = lambda f: alpha.open(base + "/match/" + f).read().decode().split("<h1>")[1].split("</h1>")[0]
+    house = next(f for f in fights if "Beta" not in title(f))
     for who in (beta, anon):  # Beta was not in Alpha-vs-house, and nobody logged out gets any log
-        try:
-            who.open(base + "/log/" + house.split('"')[0])
-            raise AssertionError("someone got a log of a fight they did not play")
-        except urllib.error.HTTPError as e:
-            assert e.code == 404
+        for kind in (".jsonl.gz", ".txt"):
+            try:
+                who.open(base + "/log/" + house + kind)
+                raise AssertionError("someone got a log of a fight they did not play")
+            except urllib.error.HTTPError as e:
+                assert e.code == 404
     assert 'href="/log/' not in beta.open(base + "/team/Alpha").read().decode()  # not even a link on others' pages
-    assert "Download every deal" in alpha.open(base + "/match/" + log.split(".jsonl")[0]).read().decode()
+    assert "Readable log" in alpha.open(base + "/match/" + log.split(".jsonl")[0]).read().decode()
     # A fight from before logs existed shows "no log", not a dead link.
     os.remove(data / "logs" / log.replace("/", "-"))
     assert "no log" in alpha.open(base + "/team/Alpha").read().decode()
@@ -235,32 +273,51 @@ def test_schedule(tmp: Path):
                 con.execute("insert into subs(team, created, file, status) values(?, 0, 'x.py', 'ok')", (t,))
         return {r["team"]: r["id"] for r in arena.entries(arena.db())}
 
-    rating: dict[int, float] = {}
+    strength: dict[int, float] = {}
 
     def play(a, b):
-        sb = rating.get(b, 0.0) if a <= 3 else 0.0  # house bots are ids 1-3, always the older side
+        sa = strength.get(a, 0.0) - strength.get(b, 0.0)  # the stronger bot wins by the gap
         with arena.db() as con:
             con.execute("insert into matches(stage, a, b, pnl_a, pnl_b, deals, notes, replay, created, score_a, score_b)"
-                        " values('live', ?, ?, 0, 0, 2, '[]', '[]', 0, ?, ?)", (a, b, -sb, sb))
+                        " values('live', ?, ?, 0, 0, 2, '[]', '[]', 0, ?, ?)", (a, b, sa, -sa))
+
+    def step():
+        job = arena.next_job()
+        if job is None:
+            return None
+        a, b = job[1]["id"], job[2]["id"]
+        arena.BUSY.discard(("live", a, b))
+        play(a, b)
+        return job[1], job[2]
 
     def run_all():
         played = []
-        while (job := arena.next_job()) is not None:
-            a, b = job[1]["id"], job[2]["id"]
-            arena.BUSY.discard(("live", a, b))
-            play(a, b)
-            played.append((job[1]["team"], job[2]["team"]))
+        while (j := step()) is not None:
+            played.append((j[0]["team"], j[1]["team"]))
         return played
 
-    # Placement: New meets the house bots, then Strong (rated closest), then Weak.
-    ids = fresh("sched1", ("Strong", "Weak", "New"))
-    rating.update({ids["Strong"]: 5.0, ids["Weak"]: -5.0, ids["New"]: 4.0})
-    for a, b in [(1, 2), (1, 3), (2, 3), (ids["Strong"], ids["Weak"])] + \
-            [(h, ids[t]) for t in ("Strong", "Weak") for h in (1, 2, 3)]:
-        play(a, b)
-    order = run_all()
-    assert [o[1] for o in order[:3]] == ["New"] * 3 and all(o[0].startswith("House") for o in order[:3]), order
-    assert order[3:] == [("Strong", "New"), ("Weak", "New")], order
+    # Placement: New meets 3 random opponents (house bots are not special), then
+    # whoever's current rating is closest to its own, working outward.
+    ids = fresh("sched1", ("Strong", "Mid", "Weak", "New"))
+    strength.update({1: -6.0, 2: -7.0, 3: -5.0, ids["Strong"]: 5.0, ids["Mid"]: 1.0, ids["Weak"]: -2.0, ids["New"]: 3.0})
+    others = [i for i in ids.values() if i != ids["New"]]
+    for i, a in enumerate(others):
+        for b in others[i + 1:]:
+            play(min(a, b), max(a, b))
+    new = ids["New"]
+    shuffled = sorted(others, key=lambda o: arena.derive_seed("order", min(o, new), max(o, new)))
+    first = [step() for _ in range(3)]
+    assert sorted(o["id"] for f in first for o in f if o["id"] != new) == sorted(shuffled[:3]), first
+    remaining = set(others) - set(shuffled[:3])
+    while remaining:
+        ms = arena.db().execute("select a, b, score_a, score_b from matches where stage = 'live'").fetchall()
+        r = arena.live_ratings(ms, set(ids.values()))
+        best = min(abs(r[o][0] - r[new][0]) for o in remaining)
+        pair = step()
+        opp = next(o["id"] for o in pair if o["id"] != new)
+        assert opp in remaining and abs(r[opp][0] - r[new][0]) == best, (opp, r)
+        remaining.discard(opp)
+    assert step() is None
 
     # Balance: two fresh uploads take turns instead of one going first; every pair once.
     ids = fresh("sched2", ("One", "Two", "Three"))
@@ -280,6 +337,8 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
         test_sandbox(Path(d))
         print("sandbox ok")
+        test_budget(Path(d))
+        print("budget ok")
         test_arena(Path(d))
         print("arena ok")
         test_time_limit(Path(d))
